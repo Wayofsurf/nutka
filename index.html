@@ -283,7 +283,7 @@ const store={
   set(k,v){try{localStorage.setItem('nutka:'+k,JSON.stringify(v))}catch(e){}}
 };
 let progress=store.get('progress',{});
-let settings=Object.assign({names:'letters',kbLabels:true,hints:true,volume:0.8,mic:false,sens:1.4,onboarded:false,instrument:'screen',level:'zero',goalMin:5,midi:false,midiSound:false,drums:true},store.get('settings',{}));
+let settings=Object.assign({names:'letters',kbLabels:true,hints:true,volume:0.8,mic:false,sens:1.4,onboarded:false,gapMs:300,instrument:'screen',level:'zero',goalMin:5,midi:false,midiSound:false,drums:true},store.get('settings',{}));
 let stats=Object.assign({streak:0,lastDay:null,notes:0,seconds:0,todaySec:0,today:null,lessons:0},store.get('stats',{}));
 const dayKey=(d=new Date())=>d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate();
 function rollDay(){const k=dayKey();if(stats.today!==k){stats.today=k;stats.todaySec=0}
@@ -586,13 +586,14 @@ function renderProfile(){
   <div class="set">
    <div class="row"><div class="l">Słuchaj mojego pianina<small id="micStat">${Mic.statusText()}</small></div><button class="tog ${Mic.on?'on':''}" id="micTog" aria-label="mikrofon"></button></div>
    <div class="row"><div class="l">Słyszę<small>Zagraj jeden dźwięk, by sprawdzić</small></div><div class="micRead"><b id="micNote">–</b><div class="bar"><i id="micLvl" style="width:0%"></i></div></div></div>
+   <div class="row"><div class="l">Przerwa po nucie<small>Ile czekać, zanim zaliczy się następną nutę</small></div>${seg('gapMs',[[150,'Krótka'],[300,'Średnia'],[600,'Długa']])}</div>
    <div class="row"><div class="l">Czułość<small>Zwiększ, jeśli pianino gra cicho</small></div><input type="range" min="0.5" max="3" step="0.1" value="${settings.sens}" id="sens"></div>
   </div>
   <p class="note">Postaw telefon na pulpicie pianina i zagraj. Najlepiej rozpoznawane są pojedyncze dźwięki; przy akordzie wystarczy, że aplikacja usłyszy jeden z nich, a oktawa nie musi się zgadzać. Gdy mikrofon jest włączony, dźwięk z prawdziwego instrumentu nie jest dublowany przez aplikację.<br><br><b>Uwaga:</b> podgląd na claude.ai zawsze blokuje mikrofon. Żeby go użyć, otwórz plik aplikacji bezpośrednio w Chrome lub Safari – z dysku komputera albo ze strony https.</p>
   <div class="secTitle"><h3>Jak grać</h3></div>
   <p class="note">Graj na klawiaturze na ekranie – działa wielodotyk, więc akordy też. Na komputerze możesz używać klawiatury: rząd <b>Q W E R T Y U I</b> to dźwięki od C4, a rząd <b>Z X C V B N M</b> – od C3. Pianino lub keyboard MIDI podłączone kablem zostanie wykryte, jeśli przeglądarka na to pozwala.</p>
   <div class="set"><div class="row"><button class="danger" id="reset">Wyzeruj postępy</button></div></div>`;
-  el.querySelectorAll('[data-seg]').forEach(s=>s.querySelectorAll('button').forEach(b=>b.onclick=()=>{const k=s.dataset.seg;settings[k]=k==='goalMin'?+b.dataset.v:b.dataset.v;saveSettings();renderProfile()}));
+  el.querySelectorAll('[data-seg]').forEach(s=>s.querySelectorAll('button').forEach(b=>b.onclick=()=>{const k=s.dataset.seg;settings[k]=(k==='goalMin'||k==='gapMs')?+b.dataset.v:b.dataset.v;saveSettings();renderProfile()}));
   $('#midiBtn').onclick=async()=>{const n=await connectMidi();if(n<0)$('#midiStat').textContent='Przeglądarka nie dała dostępu do MIDI (na iPhonie MIDI w przeglądarce nie działa).';else renderProfile()};
   $('#reOnb').onclick=()=>showOnb(1);
   el.querySelectorAll('[data-tog]').forEach(b=>b.onclick=()=>{settings[b.dataset.tog]=!settings[b.dataset.tog];saveSettings();renderProfile()});
@@ -644,7 +645,7 @@ function startRun(mode){
   else{P.countIn=Math.max(2,Math.round(P.piece.ts>=2?P.piece.ts:3));if(P.piece.pickup)P.countIn=Math.max(P.countIn,3);
     const now=Synth.ctx?Synth.ctx.currentTime:0;for(let i=0;i<P.countIn;i++)Synth.click(i===0,now+0.12+i/P.bps);
     P.t0=performance.now()+120;P.viewT=-P.countIn}
-  P.lastHalf=-1;P.band=mode!=='wait'&&settings.drums&&!!(flow&&flow.band);
+  P.lastHalf=-1;P.lastAcceptAt=0;P.lastPcs=null;P.band=mode!=='wait'&&settings.drums&&!!(flow&&flow.band);
   P.running=true;hideDlg();setStatsUI();
 }
 function hint(t,ms){const h=$('#hint');h.textContent=t;h.style.opacity=1;clearTimeout(hint._t);hint._t=setTimeout(()=>h.style.opacity=0,ms)}
@@ -698,11 +699,16 @@ function judge(m,mic){
   const match=x=>x.midi===m||(mic&&x.midi%12===m%12);
   if(P.mode==='wait'){
     const st=P.steps[P.si];if(!st)return;
+    // wait after every accepted note: short pause + playhead must reach the next note
+    const gap=mic?settings.gapMs:Math.min(settings.gapMs,150);
+    const samePc=P.lastPcs&&P.lastPcs.includes(m%12);
+    if(now-P.lastAcceptAt<(mic&&samePc?gap*1.2:gap))return;
+    if(Math.abs(P.viewT-st.t)>0.25)return;
     const n=st.notes.find(x=>match(x)&&x.state==='pending');
     if(n){if(mic)st.notes.forEach(x=>{if(x.state==='pending'){x.state='hit';x.hitAt=now;flashKey(x.midi,'good')}});else{n.state='hit';n.hitAt=now;flashKey(m,'good')}
       if(st.notes.every(x=>x.state==='hit')){
         if(st.clean){P.stats.clean++;P.stats.combo++;P.stats.best=Math.max(P.stats.best,P.stats.combo);comboFb()}else P.stats.combo=0;
-        P.si++}}
+        P.lastAcceptAt=now;P.lastPcs=st.notes.map(x=>x.midi%12);P.si++}}
     else if(!st.notes.some(match)){st.clean=false;wrong(m,now)}
   }else{
     const w=winBeats();let best=null,bd=1e9;
@@ -1010,7 +1016,7 @@ function yin(buf,sr){
   return{f:sr/(tau+sh),conf:1-b};
 }
 const Mic={on:false,state:'off',err:'',stream:null,an:null,buf:null,sr:48000,raf:0,lastTick:0,level:0,noise:0.003,
-  cur:null,cand:null,candN:0,trough:9,lastAt:0,heard:null,muted:{},
+  cur:null,cand:null,candN:0,trough:9,peak:0,lastAt:0,heard:null,muted:{},
   statusText(){return this.state==='on'?'Słucham…':this.state==='err'?this.err:'Wyłączony – grasz na ekranie'},
   async start(){
     const md=navigator.mediaDevices;
@@ -1045,8 +1051,10 @@ const Mic={on:false,state:'off',err:'',stream:null,an:null,buf:null,sr:48000,raf
     const m=Math.round(69+12*Math.log2(p.f/440));if(m<24||m>108)return;
     if(m===this.cand)this.candN++;else{this.cand=m;this.candN=1}
     if(this.candN<2){this.ui(this.cur);return}
-    const onset=r>this.trough*2&&now-this.lastAt>120;
-    if(m!==this.cur||onset){if(this.cur!=null)this.off(this.cur);this.cur=m;this.lastAt=now;this.trough=9;this.on_(m)}
+    // same note counts again only after a real new key strike: level must have dropped and then jumped back up
+    const onset=m===this.cur&&r>this.trough*1.8&&this.trough<this.peak*0.7&&now-this.lastAt>180;
+    if(m!==this.cur||onset){if(this.cur!=null)this.off(this.cur);this.cur=m;this.lastAt=now;this.peak=r;this.trough=r;this.on_(m)}
+    else if(r>this.peak){this.peak=r;this.trough=r}else this.trough=Math.min(this.trough,r);
     this.ui(m);
   },
   on_(m){this.heard=m;if(this.isMuted(m))return;onbHeard(m);
